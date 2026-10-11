@@ -3,7 +3,7 @@ news_router.py
 ──────────────
 뉴스 조회 라우터.
 - /news/{symbol}: 특정 종목 뉴스 및 요약
-- /news/market-pulse: 시장 전체 뉴스(Yahoo Finance·CNBC·MarketWatch) 및 요약
+- /news/market-pulse: 시장 전체 뉴스(소스: news_service.MARKET_RSS_FEEDS) 및 요약
 """
 
 import logging
@@ -138,8 +138,8 @@ async def get_market_pulse(
     db=Depends(get_db),
 ):
     """
-    Yahoo Finance·CNBC·MarketWatch의 최신 시장 뉴스 10개를 가져와 '똑똑한 비서' 페르소나로 요약한다.
-    1시간 이내에 수집된 기사가 있으면 DB 캐시를 재사용한다.
+    MARKET_RSS_FEEDS에서 소스별로 고르게 섞은 최신 시장 뉴스 최대 10개를 가져와 '똑똑한 비서' 페르소나로 요약한다.
+    기사 캐시 TTL(article_ttl_hours) 이내에 수집된 기사가 있으면 DB 캐시를 재사용한다.
     """
     ticker = await ensure_ticker(db, "MARKET", lookup_profile=False)
     ticker_id = ticker["id"]

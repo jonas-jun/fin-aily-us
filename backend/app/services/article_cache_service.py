@@ -31,7 +31,9 @@ async def get_cached_articles(
         .select("*")
         .eq("ticker_id", ticker_id)
         .gte("created_at", cutoff.isoformat())
-        .order("published_at", desc=True)
+        # news_service._newest_first와 같은 순서: 최신순, 시각 없음은 뒤로, 동률은 저장 순서
+        .order("published_at", desc=True, nullsfirst=False)
+        .order("id")
         .limit(limit)
         .execute()
     )
