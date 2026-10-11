@@ -2,7 +2,7 @@
 article_cache_service.py
 ────────────────────────
 뉴스 기사 DB 캐싱 서비스.
-- 1시간 TTL로 기사를 캐싱하여 외부 API 중복 호출을 방지한다.
+- article_ttl_hours(기본 1시간) TTL로 기사를 캐싱하여 외부 API 중복 호출을 방지한다.
 """
 
 import logging
