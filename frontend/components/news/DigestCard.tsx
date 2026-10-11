@@ -33,7 +33,9 @@ function DigestList({ digest, articles, marketPulse }: ListProps) {
       <div className="flex flex-col gap-2 mb-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-base">📝</span>
-          <h2 className="font-semibold text-slate-800 text-sm">Yahoo Finance News AI Summary</h2>
+          <h2 className="font-semibold text-slate-800 text-sm">
+            {marketPulse ? "Market News AI Summary" : "Yahoo Finance News AI Summary"}
+          </h2>
           <span className="text-xs text-slate-400">
             최근 {based_on_articles}개 기사 기반
           </span>
