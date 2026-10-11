@@ -166,6 +166,10 @@ NEXT_PUBLIC_API_URL=http://localhost:8000/v1
 
 ### 배포
 - **Frontend**: Vercel — main 브랜치 push 시 자동 배포. `NEXT_PUBLIC_API_URL`에 Cloud Run URL + `/v1` 설정 (값 변경 시 Redeploy 필요)
-- **Backend**: Google Cloud Run — `--no-cpu-throttling`(응답 반환 후에도 백그라운드 리서치 잡이 CPU를 계속 사용)과 `--min-instances 1`(유휴 시 인스턴스 회수로 잡이 중단되는 것 방지) 플래그가 필수. 상세 절차는 `working/cloudrun.md` 참조
+- **Backend**: Google Cloud Run — main 브랜치에 `backend/**` 변경이 push되면 GitHub Actions(`.github/workflows/deploy-backend.yml`)가 자동 배포. Actions 탭에서 수동 실행(`workflow_dispatch`)도 가능
+  - 서비스 설정 `--no-cpu-throttling`(응답 반환 후에도 백그라운드 리서치 잡이 CPU를 계속 사용)과 `--min-instances 1`(유휴 시 인스턴스 회수로 잡이 중단되는 것 방지)은 필수이며, 배포 시 기존 값이 그대로 유지된다
+  - **DB 마이그레이션은 자동 적용되지 않는다.** `backend/migrations/`에 새 파일이 있으면 머지 전에 Supabase SQL Editor에서 먼저 실행한다
+  - GCP 인증은 Workload Identity Federation(키 파일 없음). 최초 1회 `.github/setup-gcp-deploy.sh`를 프로젝트 owner 계정으로 실행하고, 출력된 `GCP_WIF_PROVIDER`·`GCP_DEPLOY_SA`를 레포 Actions Variables에 등록한다
+  - 롤백: `gcloud run services update-traffic fin-aily-us --project fin-aily-us --region asia-northeast1 --to-revisions <이전 리비전>=100`
 
 </details>
