@@ -102,6 +102,7 @@
 3. **SQL Editor** 에서 마이그레이션을 순서대로 실행:
    - `backend/migrations/001_initial_schema.sql`
    - `backend/migrations/002_research.sql`
+   - `backend/migrations/003_summary_articles.sql`
 
 ### 2. Backend
 ```bash

@@ -22,6 +22,7 @@ from app.services.cache_service import get_cached_digest, save_digest_cache
 from app.services.news_service import RawArticle, fetch_articles, fetch_market_news
 from app.services.summarization_service import (
     ArticleInput,
+    DigestResult,
     summarize_articles,
 )
 from app.services.ticker_service import ensure_ticker
@@ -74,7 +75,7 @@ def _build_article_outs(articles: list[RawArticle]) -> list[ArticleOut]:
 async def _get_or_fetch_articles(
     db, ticker_id: int, fetch_fn, limit: int
 ) -> list[RawArticle]:
-    """1시간 이내 캐시 기사가 있으면 사용하고, 없으면 외부 수집 후 DB에 저장한다."""
+    """기사 캐시(article_ttl_hours) 이내 기사가 있으면 사용하고, 없으면 외부 수집 후 DB에 저장한다."""
     cached = await get_cached_articles(db, ticker_id, limit)
     if cached:
         return _rows_to_raw_articles(cached)
@@ -85,23 +86,20 @@ async def _get_or_fetch_articles(
     return raw_articles
 
 
-async def _get_or_summarize(
+def _digest_out(digest: DigestResult, based_on_articles: int) -> DigestOut:
+    return DigestOut(
+        summary=digest.summary,
+        sentiment=SentimentOut(score=digest.sentiment_score, label=digest.sentiment_label),
+        based_on_articles=based_on_articles,
+    )
+
+
+async def _summarize_and_cache(
     db, ticker_id: int, symbol: str, company_name: str,
     articles: list[RawArticle], lang: str,
     feature: str = "ticker_brief",
-) -> DigestOut:
-    """24h 요약 캐시가 있으면 사용하고, 없으면 AI 요약 후 캐시에 저장한다."""
-    cached_digest = await get_cached_digest(db, ticker_id, lang)
-    if cached_digest:
-        return DigestOut(
-            summary=cached_digest.summary,
-            sentiment=SentimentOut(
-                score=cached_digest.sentiment_score,
-                label=cached_digest.sentiment_label,
-            ),
-            based_on_articles=cached_digest.article_count,
-        )
-
+) -> tuple[DigestOut, list[ArticleOut]]:
+    """AI 요약을 생성하고, 응답할 기사 목록과 함께 요약 캐시에 저장한다."""
     settings = get_settings()
     api_key = settings.gemini_api_key or None
 
@@ -115,15 +113,9 @@ async def _get_or_summarize(
         feature=feature,
     )
 
-    await save_digest_cache(db, ticker_id, digest)
-
-    return DigestOut(
-        summary=digest.summary,
-        sentiment=SentimentOut(
-            score=digest.sentiment_score, label=digest.sentiment_label
-        ),
-        based_on_articles=len(inputs),
-    )
+    article_outs = _build_article_outs(articles)
+    await save_digest_cache(db, ticker_id, digest, article_outs)
+    return _digest_out(digest, len(inputs)), article_outs
 
 
 # ── 엔드포인트 ────────────────────────────────────────────────────────────────
@@ -139,38 +131,44 @@ async def get_market_pulse(
 ):
     """
     MARKET_RSS_FEEDS에서 소스별로 고르게 섞은 최신 시장 뉴스 최대 10개를 가져와 '똑똑한 비서' 페르소나로 요약한다.
-    기사 캐시 TTL(article_ttl_hours) 이내에 수집된 기사가 있으면 DB 캐시를 재사용한다.
+    요약 캐시가 유효하면 요약과 함께 저장한 기사 목록으로 응답하고, 아니면 기사 캐시
+    (article_ttl_hours) 또는 외부 수집 결과로 요약을 새로 만든다.
     """
     ticker = await ensure_ticker(db, "MARKET", lookup_profile=False)
     ticker_id = ticker["id"]
 
-    raw_articles = await _get_or_fetch_articles(
-        db, ticker_id, lambda: fetch_market_news(limit=10), limit=10
-    )
-    if not raw_articles:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"code": "NO_NEWS", "message": "최신 시장 뉴스를 가져올 수 없습니다."},
+    cached = await get_cached_digest(db, ticker_id, lang)
+    if cached:
+        digest_out = _digest_out(cached.digest, cached.digest.article_count)
+        article_outs = cached.articles
+    else:
+        raw_articles = await _get_or_fetch_articles(
+            db, ticker_id, lambda: fetch_market_news(limit=10), limit=10
         )
+        if not raw_articles:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "NO_NEWS", "message": "최신 시장 뉴스를 가져올 수 없습니다."},
+            )
 
-    try:
-        digest_out = await _get_or_summarize(
-            db, ticker_id, "MARKET", "Market Top Stories", raw_articles, lang,
-            feature="market_pulse",
-        )
-    except Exception as exc:
-        logger.error("Market Pulse 요약 실패: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "SUMMARIZATION_FAILED", "message": "시장 요약 생성에 실패했습니다."},
-        )
+        try:
+            digest_out, article_outs = await _summarize_and_cache(
+                db, ticker_id, "MARKET", "Market Top Stories", raw_articles, lang,
+                feature="market_pulse",
+            )
+        except Exception as exc:
+            logger.error("Market Pulse 요약 실패: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": "SUMMARIZATION_FAILED", "message": "시장 요약 생성에 실패했습니다."},
+            )
 
     return NewsResponse(
         symbol="MARKET",
         company_name="Market Top Stories",
         last_updated=utc_now_iso(),
         digest=digest_out,
-        articles=_build_article_outs(raw_articles),
+        articles=article_outs,
     )
 
 
@@ -187,36 +185,42 @@ async def get_news(
 ):
     """
     특정 티커에 대한 최신 뉴스를 수집하고 AI 종합 요약을 제공한다.
-    1시간 이내에 수집된 기사가 있으면 DB 캐시를 재사용한다.
+    요약 캐시가 유효하면 요약과 함께 저장한 기사 목록으로 응답하고, 아니면 기사 캐시
+    (article_ttl_hours) 또는 외부 수집 결과로 요약을 새로 만든다.
     """
     upper_symbol = symbol.upper()
     ticker = await ensure_ticker(db, upper_symbol)
     ticker_id, company = ticker["id"], ticker["name"]
 
-    raw_articles = await _get_or_fetch_articles(
-        db, ticker_id, lambda: fetch_articles(upper_symbol, limit), limit=limit
-    )
-    if not raw_articles:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"code": "NO_NEWS", "message": f"{upper_symbol}에 대한 뉴스를 찾을 수 없습니다."},
+    cached = await get_cached_digest(db, ticker_id, lang)
+    if cached:
+        digest_out = _digest_out(cached.digest, cached.digest.article_count)
+        article_outs = cached.articles
+    else:
+        raw_articles = await _get_or_fetch_articles(
+            db, ticker_id, lambda: fetch_articles(upper_symbol, limit), limit=limit
         )
+        if not raw_articles:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "NO_NEWS", "message": f"{upper_symbol}에 대한 뉴스를 찾을 수 없습니다."},
+            )
 
-    try:
-        digest_out = await _get_or_summarize(
-            db, ticker_id, upper_symbol, company, raw_articles, lang
-        )
-    except Exception as exc:
-        logger.error("종목 요약 실패: symbol=%s, error=%s", upper_symbol, exc)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "SUMMARIZATION_FAILED", "message": "뉴스 요약 생성에 실패했습니다."},
-        )
+        try:
+            digest_out, article_outs = await _summarize_and_cache(
+                db, ticker_id, upper_symbol, company, raw_articles, lang
+            )
+        except Exception as exc:
+            logger.error("종목 요약 실패: symbol=%s, error=%s", upper_symbol, exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": "SUMMARIZATION_FAILED", "message": "뉴스 요약 생성에 실패했습니다."},
+            )
 
     return NewsResponse(
         symbol=upper_symbol,
         company_name=company,
         last_updated=utc_now_iso(),
         digest=digest_out,
-        articles=_build_article_outs(raw_articles),
+        articles=article_outs,
     )
