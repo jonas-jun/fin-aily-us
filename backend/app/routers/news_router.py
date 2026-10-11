@@ -3,7 +3,7 @@ news_router.py
 ──────────────
 뉴스 조회 라우터.
 - /news/{symbol}: 특정 종목 뉴스 및 요약
-- /news/market-pulse: Yahoo Finance 전체 시장 뉴스 및 요약
+- /news/market-pulse: 시장 전체 뉴스(Yahoo Finance·CNBC·MarketWatch) 및 요약
 """
 
 import logging
@@ -131,14 +131,14 @@ async def _get_or_summarize(
 @router.get(
     "/market-pulse",
     response_model=NewsResponse,
-    summary="Yahoo Finance 최신 뉴스 + AI 비서 요약",
+    summary="시장 최신 뉴스 + AI 비서 요약",
 )
 async def get_market_pulse(
     lang: str = Query(default="ko", pattern="^(ko|en)$"),
     db=Depends(get_db),
 ):
     """
-    Yahoo Finance의 최신 뉴스 10개를 가져와 '똑똑한 비서' 페르소나로 요약한다.
+    Yahoo Finance·CNBC·MarketWatch의 최신 시장 뉴스 10개를 가져와 '똑똑한 비서' 페르소나로 요약한다.
     1시간 이내에 수집된 기사가 있으면 DB 캐시를 재사용한다.
     """
     ticker = await ensure_ticker(db, "MARKET", lookup_profile=False)
@@ -155,7 +155,7 @@ async def get_market_pulse(
 
     try:
         digest_out = await _get_or_summarize(
-            db, ticker_id, "MARKET", "Yahoo Finance Top Stories", raw_articles, lang,
+            db, ticker_id, "MARKET", "Market Top Stories", raw_articles, lang,
             feature="market_pulse",
         )
     except Exception as exc:
@@ -167,7 +167,7 @@ async def get_market_pulse(
 
     return NewsResponse(
         symbol="MARKET",
-        company_name="Yahoo Finance",
+        company_name="Market Top Stories",
         last_updated=utc_now_iso(),
         digest=digest_out,
         articles=_build_article_outs(raw_articles),
