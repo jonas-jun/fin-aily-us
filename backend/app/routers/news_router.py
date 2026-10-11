@@ -86,11 +86,12 @@ async def _get_or_fetch_articles(
     return raw_articles
 
 
-def _digest_out(digest: DigestResult, based_on_articles: int) -> DigestOut:
+def _digest_out(digest: DigestResult) -> DigestOut:
+    # 요약 입력은 앞 MAX_ARTICLES개로 잘리므로, 캐시 미스·히트 모두 요약 결과의 기사 수를 쓴다.
     return DigestOut(
         summary=digest.summary,
         sentiment=SentimentOut(score=digest.sentiment_score, label=digest.sentiment_label),
-        based_on_articles=based_on_articles,
+        based_on_articles=digest.article_count,
     )
 
 
@@ -99,7 +100,11 @@ async def _summarize_and_cache(
     articles: list[RawArticle], lang: str,
     feature: str = "ticker_brief",
 ) -> tuple[DigestOut, list[ArticleOut]]:
-    """AI 요약을 생성하고, 응답할 기사 목록과 함께 요약 캐시에 저장한다."""
+    """AI 요약을 생성하고, 응답할 기사 목록과 함께 요약 캐시에 저장한다.
+
+    기사 목록은 입력 전체다(요약 입력은 그중 앞 MAX_ARTICLES개). 캐시 저장이 실패해도
+    이미 만든 요약으로 응답한다. (예: migration 003 미적용 → ERROR 로그로 드러난다)
+    """
     settings = get_settings()
     api_key = settings.gemini_api_key or None
 
@@ -114,8 +119,11 @@ async def _summarize_and_cache(
     )
 
     article_outs = _build_article_outs(articles)
-    await save_digest_cache(db, ticker_id, digest, article_outs)
-    return _digest_out(digest, len(inputs)), article_outs
+    try:
+        await save_digest_cache(db, ticker_id, digest, article_outs)
+    except Exception:
+        logger.exception("요약 캐시 저장 실패(응답은 정상 반환): ticker_id=%d, symbol=%s", ticker_id, symbol)
+    return _digest_out(digest), article_outs
 
 
 # ── 엔드포인트 ────────────────────────────────────────────────────────────────
@@ -139,7 +147,7 @@ async def get_market_pulse(
 
     cached = await get_cached_digest(db, ticker_id, lang)
     if cached:
-        digest_out = _digest_out(cached.digest, cached.digest.article_count)
+        digest_out = _digest_out(cached.digest)
         article_outs = cached.articles
     else:
         raw_articles = await _get_or_fetch_articles(
@@ -156,8 +164,8 @@ async def get_market_pulse(
                 db, ticker_id, "MARKET", "Market Top Stories", raw_articles, lang,
                 feature="market_pulse",
             )
-        except Exception as exc:
-            logger.error("Market Pulse 요약 실패: %s", exc)
+        except Exception:
+            logger.exception("Market Pulse 요약 실패: ticker_id=%d", ticker_id)
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={"code": "SUMMARIZATION_FAILED", "message": "시장 요약 생성에 실패했습니다."},
@@ -194,7 +202,7 @@ async def get_news(
 
     cached = await get_cached_digest(db, ticker_id, lang)
     if cached:
-        digest_out = _digest_out(cached.digest, cached.digest.article_count)
+        digest_out = _digest_out(cached.digest)
         article_outs = cached.articles
     else:
         raw_articles = await _get_or_fetch_articles(
@@ -210,8 +218,8 @@ async def get_news(
             digest_out, article_outs = await _summarize_and_cache(
                 db, ticker_id, upper_symbol, company, raw_articles, lang
             )
-        except Exception as exc:
-            logger.error("종목 요약 실패: symbol=%s, error=%s", upper_symbol, exc)
+        except Exception:
+            logger.exception("종목 요약 실패: symbol=%s", upper_symbol)
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={"code": "SUMMARIZATION_FAILED", "message": "뉴스 요약 생성에 실패했습니다."},
